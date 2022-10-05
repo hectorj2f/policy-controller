@@ -776,6 +776,8 @@ func (v *Validator) ResolveCronJob(ctx context.Context, c *duckv1.CronJob) {
 		ServiceAccountName: c.Spec.JobTemplate.Spec.Template.Spec.ServiceAccountName,
 		ImagePullSecrets:   imagePullSecrets,
 	}
+
+	//c.Annotations = GetAnnotations()
 	v.resolvePodSpec(ctx, &c.Spec.JobTemplate.Spec.Template.Spec, opt)
 }
 
