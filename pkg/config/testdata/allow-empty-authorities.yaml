@@ -17,12 +17,10 @@ kind: ConfigMap
 metadata:
   name: config-policy-controller
   namespace: cosign-system
+  labels:
+    policy.sigstore.dev/release: devel
+
 data:
   _example: |
-    ################################
-    #                              #
-    #    EXAMPLE CONFIGURATION     #
-    #                              #
-    ################################
-    no-match-policy: warn
-    fail-on-empty-authorities: true
+    no-match-policy: deny
+    fail-on-empty-authorities: false
