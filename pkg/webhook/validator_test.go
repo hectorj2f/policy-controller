@@ -70,6 +70,8 @@ const (
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENAyijLvRu5QpCPp2uOj8C79ZW1VJ
 SID/4H61ZiRzN4nqONzp+ZF22qQTk3MFO3D0/ZKmWHAosIf2pf2GHH7myA==
 -----END PUBLIC KEY-----`
+
+	verificationTupleJSON = `{"name": "cluster-image-policy", "uid: "", "resourceVersion": "1", "image": "ghcr.io/lukehinds/cosign-keyless-action@sha256:42e51c7fc9eaf7f41227ac51ea3d16ff079aaa53b46dc1f871ff76ffb0e278ba", "errors":[], "warnings":[], "authorityMatches":{"keyless":{"signatures":[{"subject":"https://github.com/lukehinds/cosign-keyless-action/.github/workflows/build-push-sign.yml@refs/heads/main","issuer":"https://token.actions.githubusercontent.com","githubWorkflowTrigger":"push","githubWorkflowSha":"a3f6d26a59574a575cab4fdec85eda3090b0f70d","githubWorkflowName":"build-push-sign","githubWorkflowRepo":"lukehinds/cosign-keyless-action","githubWorkflowRef":"refs/heads/main"}]}}}`
 )
 
 func TestValidatePodSpec(t *testing.T) {
@@ -663,7 +665,7 @@ func TestValidatePodSpec(t *testing.T) {
 				}
 
 				// Check the core mechanics
-				got := v.validatePodSpec(testContext, system.Namespace(), "Pod", "v1", map[string]string{}, test.ps, k8schain.Options{})
+				got := v.validatePodSpec(testContext, system.Namespace(), "Pod", "v1", map[string]string{}, map[string]string{}, test.ps, k8schain.Options{})
 				if (got != nil) != (test.want != nil) {
 					t.Errorf("validatePodSpec() = %v, wanted %v", got, test.want)
 				} else if got != nil && got.Error() != test.want.Error() {
@@ -2391,7 +2393,7 @@ func TestValidatePodSpecNonDefaultNamespace(t *testing.T) {
 
 				testContext = attachHTTPRequestToContext(testContext)
 				// Check the core mechanics
-				got := v.validatePodSpec(testContext, "my-secure-ns", "Pod", "v1", map[string]string{"test": "test"}, test.ps, k8schain.Options{})
+				got := v.validatePodSpec(testContext, "my-secure-ns", "Pod", "v1", map[string]string{"test": "test"}, map[string]string{}, test.ps, k8schain.Options{})
 				if (got != nil) != (test.want != nil) {
 					t.Errorf("validatePodSpec() = %v, wanted %v", got, test.want)
 				} else if got != nil && got.Error() != test.want.Error() {
@@ -2578,7 +2580,7 @@ func TestValidatePodSpecCancelled(t *testing.T) {
 	cancelledContext, cancelFunc := context.WithCancel(ctx)
 	wantErr := "context was canceled before validation completed"
 	cancelFunc()
-	gotErrs := v.validatePodSpec(cancelledContext, "default", "pod", "v1", map[string]string{}, ps, k8schain.Options{})
+	gotErrs := v.validatePodSpec(cancelledContext, "default", "pod", "v1", map[string]string{}, map[string]string{}, ps, k8schain.Options{})
 	if gotErrs == nil {
 		t.Errorf("Did not get an error on canceled context")
 	} else if !strings.Contains(gotErrs.Error(), wantErr) {
@@ -2722,7 +2724,89 @@ func TestPolicyControllerConfigNoMatchPolicy(t *testing.T) {
 	for _, tc := range tests {
 		testCtx := policycontrollerconfig.ToContext(ctx, &policycontrollerconfig.PolicyControllerConfig{NoMatchPolicy: tc.noMatchPolicy, FailOnEmptyAuthorities: true})
 
-		got := v.validatePodSpec(testCtx, system.Namespace(), "pod", "v1", map[string]string{}, testPodSpec, k8schain.Options{})
+		got := v.validatePodSpec(testCtx, system.Namespace(), "pod", "v1", map[string]string{}, map[string]string{}, testPodSpec, k8schain.Options{})
+		if (got != nil) != (tc.want != nil) {
+			t.Errorf("ValidatePodSpecable() = %v, wanted %v", got, tc.want)
+		} else if got != nil && got.Error() != tc.want.Error() {
+			t.Errorf("ValidatePodSpecable() = %v, wanted %v", got, tc.want)
+		}
+		if tc.want != nil && tc.wantWarn {
+			tc.want.Level = apis.WarningLevel
+		}
+		// Check the warning/error level.
+		if got != nil && tc.want != nil {
+			if got.Level != tc.want.Level {
+				t.Errorf("ValidatePod() Wrong Level = %v, wanted %v", got.Level, tc.want.Level)
+			}
+		}
+	}
+}
+
+func TestPolicyControllerWithAnnotations(t *testing.T) {
+	digest := "ghcr.io/lukehinds/cosign-keyless-action@sha256:42e51c7fc9eaf7f41227ac51ea3d16ff079aaa53b46dc1f871ff76ffb0e278ba"
+
+	testPodSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "test-container",
+			Image: digest,
+		}},
+	}
+
+	ctx, _ := rtesting.SetupFakeContext(t)
+	ctx = config.ToContext(ctx,
+		&config.Config{
+			ImagePolicyConfig: &config.ImagePolicyConfig{
+				Policies: map[string]webhookcip.ClusterImagePolicy{
+					"cluster-image-policy": {
+						Images: []v1alpha1.ImagePattern{{
+							Glob: "ghcr.io/lukehinds/**",
+						}},
+						Authorities: []webhookcip.Authority{
+							{
+								Keyless: &webhookcip.KeylessRef{
+									URL: apis.HTTP("fulcio.sigstore.dev"),
+								}},
+						},
+					},
+				},
+			},
+		})
+
+	v := NewValidator(ctx)
+	kc := fakekube.Get(ctx)
+	// Setup service acc and fakeSignaturePullSecrets for "default", "cosign-system" and "my-secure-ns" namespace
+	for _, ns := range []string{"default", system.Namespace()} {
+		kc.CoreV1().ServiceAccounts(ns).Create(ctx, &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "default",
+			},
+		}, metav1.CreateOptions{})
+
+		kc.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "fakeSignaturePullSecrets",
+			},
+			Data: map[string][]byte{
+				"dockerconfigjson": []byte(`{"auths":{"https://index.docker.io/v1/":{"username":"username","password":"password","auth":"dXNlcm5hbWU6cGFzc3dvcmQ="}}`),
+			},
+		}, metav1.CreateOptions{})
+	}
+
+	tests := []struct {
+		name          string
+		noMatchPolicy string
+		want          *apis.FieldError
+		// If above should be at warning level.
+		wantWarn bool
+	}{{
+		name:          "pass",
+		noMatchPolicy: "deny",
+	}}
+	for _, tc := range tests {
+		testCtx := policycontrollerconfig.ToContext(ctx, &policycontrollerconfig.PolicyControllerConfig{FailOnEmptyAuthorities: true})
+		annotations := make(map[string]string)
+		annotations["42e51c7fc9eaf7f41227ac51ea3d16ff079aaa53b46dc1f871ff76ffb0e278ba-"] = verificationTupleJSON
+		got := v.validatePodSpec(testCtx, system.Namespace(), "pod", "v1", map[string]string{}, annotations, testPodSpec, k8schain.Options{})
 		if (got != nil) != (tc.want != nil) {
 			t.Errorf("ValidatePodSpecable() = %v, wanted %v", got, tc.want)
 		} else if got != nil && got.Error() != tc.want.Error() {

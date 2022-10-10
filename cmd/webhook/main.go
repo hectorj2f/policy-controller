@@ -173,6 +173,10 @@ func NewValidatingAdmissionController(ctx context.Context, cmw configmap.Watcher
 }
 
 func NewMutatingAdmissionController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
+	store := config.NewStore(logging.FromContext(ctx).Named("config-store"))
+	store.WatchConfigs(cmw)
+	policyControllerConfigStore := policycontrollerconfig.NewStore(logging.FromContext(ctx).Named("config-policy-controller"))
+	policyControllerConfigStore.WatchConfigs(cmw)
 	validator := cwebhook.NewValidator(ctx)
 
 	return defaulting.NewAdmissionController(ctx,
@@ -187,6 +191,8 @@ func NewMutatingAdmissionController(ctx context.Context, cmw configmap.Watcher) 
 
 		// A function that infuses the context passed to Validate/SetDefaults with custom metadata.
 		func(ctx context.Context) context.Context {
+			ctx = store.ToContext(ctx)
+			ctx = policyControllerConfigStore.ToContext(ctx)
 			ctx = policyduckv1beta1.WithPodScalableDefaulter(ctx, validator.ResolvePodScalable)
 			ctx = duckv1.WithPodDefaulter(ctx, validator.ResolvePod)
 			ctx = duckv1.WithPodSpecDefaulter(ctx, validator.ResolvePodSpecable)

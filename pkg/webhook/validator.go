@@ -38,6 +38,7 @@ import (
 	"github.com/sigstore/rekor/pkg/generated/client"
 	"github.com/sigstore/sigstore/pkg/fulcioroots"
 	"github.com/sigstore/sigstore/pkg/signature"
+	"golang.org/x/exp/maps"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,7 +94,7 @@ func (v *Validator) ValidatePodScalable(ctx context.Context, ps *policyduckv1bet
 		ImagePullSecrets:   imagePullSecrets,
 	}
 
-	return v.validatePodSpec(ctx, ns, ps.Kind, ps.APIVersion, ps.ObjectMeta.Labels, &ps.Spec.Template.Spec, opt).ViaField("spec.template.spec")
+	return v.validatePodSpec(ctx, ns, ps.Kind, ps.APIVersion, ps.ObjectMeta.Labels, ps.Spec.Template.Annotations, &ps.Spec.Template.Spec, opt).ViaField("spec.template.spec")
 }
 
 // ValidatePodSpecable implements duckv1.PodSpecValidator
@@ -113,7 +114,7 @@ func (v *Validator) ValidatePodSpecable(ctx context.Context, wp *duckv1.WithPod)
 		ServiceAccountName: wp.Spec.Template.Spec.ServiceAccountName,
 		ImagePullSecrets:   imagePullSecrets,
 	}
-	return v.validatePodSpec(ctx, ns, wp.Kind, wp.APIVersion, wp.ObjectMeta.Labels, &wp.Spec.Template.Spec, opt).ViaField("spec.template.spec")
+	return v.validatePodSpec(ctx, ns, wp.Kind, wp.APIVersion, wp.ObjectMeta.Labels, wp.Spec.Template.Annotations, &wp.Spec.Template.Spec, opt).ViaField("spec.template.spec")
 }
 
 // ValidatePod implements duckv1.PodValidator
@@ -133,7 +134,7 @@ func (v *Validator) ValidatePod(ctx context.Context, p *duckv1.Pod) *apis.FieldE
 		ServiceAccountName: p.Spec.ServiceAccountName,
 		ImagePullSecrets:   imagePullSecrets,
 	}
-	return v.validatePodSpec(ctx, ns, p.Kind, p.APIVersion, p.ObjectMeta.Labels, &p.Spec, opt).ViaField("spec")
+	return v.validatePodSpec(ctx, ns, p.Kind, p.APIVersion, p.ObjectMeta.Labels, p.Annotations, &p.Spec, opt).ViaField("spec")
 }
 
 // ValidateCronJob implements duckv1.CronJobValidator
@@ -154,10 +155,10 @@ func (v *Validator) ValidateCronJob(ctx context.Context, c *duckv1.CronJob) *api
 		ImagePullSecrets:   imagePullSecrets,
 	}
 
-	return v.validatePodSpec(ctx, ns, c.Kind, c.APIVersion, c.ObjectMeta.Labels, &c.Spec.JobTemplate.Spec.Template.Spec, opt).ViaField("spec.jobTemplate.spec.template.spec")
+	return v.validatePodSpec(ctx, ns, c.Kind, c.APIVersion, c.ObjectMeta.Labels, c.Spec.JobTemplate.Annotations, &c.Spec.JobTemplate.Spec.Template.Spec, opt).ViaField("spec.jobTemplate.spec.template.spec")
 }
 
-func (v *Validator) validatePodSpec(ctx context.Context, namespace, kind, apiVersion string, labels map[string]string, ps *corev1.PodSpec, opt k8schain.Options) (errs *apis.FieldError) {
+func (v *Validator) validatePodSpec(ctx context.Context, namespace, kind, apiVersion string, labels map[string]string, annotations map[string]string, ps *corev1.PodSpec, opt k8schain.Options) (errs *apis.FieldError) {
 	kc, err := k8schain.New(ctx, v.client, opt)
 	if err != nil {
 		logging.FromContext(ctx).Warnf("Unable to build k8schain: %v", err)
@@ -185,8 +186,7 @@ func (v *Validator) validatePodSpec(ctx context.Context, namespace, kind, apiVer
 					results <- containerCheckResult{index: i, containerCheckResult: fe}
 					return
 				}
-
-				containerErrors := v.validateContainer(ctx, c, namespace, field, i, kind, apiVersion, labels, ociremote.WithRemoteOptions(
+				containerErrors := v.validateContainer(ctx, c, namespace, field, i, kind, apiVersion, labels, annotations, ociremote.WithRemoteOptions(
 					remote.WithContext(ctx),
 					remote.WithAuthFromKeychain(kc),
 				))
@@ -717,6 +717,14 @@ func (v *Validator) ResolvePodScalable(ctx context.Context, ps *policyduckv1beta
 		ServiceAccountName: ps.Spec.Template.Spec.ServiceAccountName,
 		ImagePullSecrets:   imagePullSecrets,
 	}
+	verificationTuples := v.setValidationTuplePodSpec(ctx, ps.Namespace, ps.Kind, ps.APIVersion, ps.ObjectMeta.Labels, &ps.Spec.Template.Spec, opt)
+	if len(verificationTuples) > 0 {
+		ps.Spec.Template.Annotations = map[string]string{}
+	}
+	for k, v := range verificationTuples {
+		ps.Spec.Template.Annotations[k] = v
+	}
+
 	v.resolvePodSpec(ctx, &ps.Spec.Template.Spec, opt)
 }
 
@@ -732,11 +740,21 @@ func (v *Validator) ResolvePodSpecable(ctx context.Context, wp *duckv1.WithPod) 
 	for _, s := range wp.Spec.Template.Spec.ImagePullSecrets {
 		imagePullSecrets = append(imagePullSecrets, s.Name)
 	}
+	ns := getNamespace(ctx, wp.Namespace)
 	opt := k8schain.Options{
-		Namespace:          getNamespace(ctx, wp.Namespace),
+		Namespace:          ns,
 		ServiceAccountName: wp.Spec.Template.Spec.ServiceAccountName,
 		ImagePullSecrets:   imagePullSecrets,
 	}
+
+	verificationTuples := v.setValidationTuplePodSpec(ctx, ns, wp.Kind, wp.APIVersion, wp.ObjectMeta.Labels, &wp.Spec.Template.Spec, opt)
+	if len(verificationTuples) > 0 {
+		wp.Spec.Template.Annotations = map[string]string{}
+	}
+	for k, v := range verificationTuples {
+		wp.Spec.Template.Annotations[k] = v
+	}
+
 	v.resolvePodSpec(ctx, &wp.Spec.Template.Spec, opt)
 }
 
@@ -751,11 +769,21 @@ func (v *Validator) ResolvePod(ctx context.Context, p *duckv1.Pod) {
 	for _, s := range p.Spec.ImagePullSecrets {
 		imagePullSecrets = append(imagePullSecrets, s.Name)
 	}
+	ns := getNamespace(ctx, p.Namespace)
 	opt := k8schain.Options{
-		Namespace:          getNamespace(ctx, p.Namespace),
+		Namespace:          ns,
 		ServiceAccountName: p.Spec.ServiceAccountName,
 		ImagePullSecrets:   imagePullSecrets,
 	}
+
+	verificationTuples := v.setValidationTuplePodSpec(ctx, ns, p.Kind, p.APIVersion, p.ObjectMeta.Labels, &p.Spec, opt)
+	if len(verificationTuples) > 0 {
+		p.Annotations = map[string]string{}
+	}
+	for k, v := range verificationTuples {
+		p.Annotations[k] = v
+	}
+
 	v.resolvePodSpec(ctx, &p.Spec, opt)
 }
 
@@ -777,7 +805,14 @@ func (v *Validator) ResolveCronJob(ctx context.Context, c *duckv1.CronJob) {
 		ImagePullSecrets:   imagePullSecrets,
 	}
 
-	//c.Annotations = GetAnnotations()
+	verificationTuples := v.setValidationTuplePodSpec(ctx, c.Namespace, c.Kind, c.APIVersion, c.ObjectMeta.Labels, &c.Spec.JobTemplate.Spec.Template.Spec, opt)
+	if len(verificationTuples) > 0 {
+		c.Spec.JobTemplate.Annotations = map[string]string{}
+	}
+	for k, v := range verificationTuples {
+		c.Spec.JobTemplate.Annotations[k] = v
+	}
+
 	v.resolvePodSpec(ctx, &c.Spec.JobTemplate.Spec.Template.Spec, opt)
 }
 
@@ -848,7 +883,7 @@ func getNamespace(ctx context.Context, namespace string) string {
 // All the matched policies were validated, or
 // no matching policies were found, but the PolicyControllerConfig has been
 // configured to allow images not matching any policies.
-func (v *Validator) validateContainer(ctx context.Context, c corev1.Container, namespace, field string, index int, kind, apiVersion string, labels map[string]string, ociRemoteOpts ...ociremote.Option) *apis.FieldError {
+func (v *Validator) validateContainer(ctx context.Context, c corev1.Container, namespace, field string, index int, kind, apiVersion string, labels map[string]string, annotations map[string]string, ociRemoteOpts ...ociremote.Option) *apis.FieldError {
 	ref, err := name.ParseReference(c.Image)
 	if err != nil {
 		return apis.ErrGeneric(err.Error(), "image").ViaFieldIndex(field, index)
@@ -866,19 +901,52 @@ func (v *Validator) validateContainer(ctx context.Context, c corev1.Container, n
 		// If there is at least one policy that matches, that means it
 		// has to be satisfied.
 		if len(policies) > 0 {
-			signatures, fieldErrors := validatePolicies(ctx, namespace, ref, policies, ociRemoteOpts...)
-			if len(signatures) != len(policies) {
-				logging.FromContext(ctx).Warnf("Failed to validate at least one policy for %s wanted %d policies, only validated %d", ref.Name(), len(policies), len(signatures))
+			// Filter unvalidated policies based on the annotations
+			filteredPolicies, signatures1, fieldErrors1 := filterUnvalidatedPolicies(ctx, policies, annotations, ref.String())
+			signatures2, fieldErrors2 := validatePolicies(ctx, namespace, ref, filteredPolicies, ociRemoteOpts...)
+			// TODO: @hectorj2f
+			maps.Copy(signatures2, signatures1)
+			maps.Copy(fieldErrors2, fieldErrors1)
+
+			if len(signatures2) != len(policies) {
+				logging.FromContext(ctx).Warnf("Failed to validate at least one policy for %s wanted %d policies, only validated %d", ref.Name(), len(policies), len(signatures2))
 			} else {
-				logging.FromContext(ctx).Infof("Validated %d policies for image %s", len(signatures), c.Image)
+				logging.FromContext(ctx).Infof("Validated %d policies for image %s", len(signatures2), c.Image)
 			}
-			return errorsToFieldErrors(c.Image, field, index, fieldErrors)
+			return errorsToFieldErrors(c.Image, field, index, fieldErrors2)
 		}
 		// Container matched no policies, so return based on the configured
 		// NoMatchPolicy.
 		return setNoMatchingPoliciesError(ctx, c.Image, field, index)
 	}
 	return nil
+}
+
+func filterUnvalidatedPolicies(ctx context.Context, policies map[string]webhookcip.ClusterImagePolicy, annotations map[string]string, image string) (map[string]webhookcip.ClusterImagePolicy, map[string]*PolicyResult, map[string][]error) {
+	filteredPolicies := make(map[string]webhookcip.ClusterImagePolicy)
+	policyResults := make(map[string]*PolicyResult)
+	fieldErrors := make(map[string][]error)
+
+	for cipName, cip := range policies {
+		tuple := VerificationTuple{Image: image, UID: cip.UID}
+		if value, ok := annotations[tuple.GenerateVerificationTupleID()]; !ok {
+			logging.FromContext(ctx).Infof("Annotations: %v", annotations)
+			logging.FromContext(ctx).Infof("Found a new policy id: '%s' and name for image %s not included in annotations", tuple.GenerateVerificationTupleID(), cipName, image)
+			filteredPolicies[cipName] = cip
+		} else {
+			logging.FromContext(ctx).Infof("Found policy %s in annotations for image %s", cipName, image)
+			// Unmarshal the annotation
+			var verificationTuple VerificationTuple
+			err := json.Unmarshal([]byte(value), &verificationTuple)
+			if err != nil {
+				logging.FromContext(ctx).Errorf("Unable to unmarshal the annotation into a Verification Tuple for policy %s with annotations: %v", cipName, value)
+			}
+			policyResult := PolicyResult{AuthorityMatches: verificationTuple.AuthorityMatches}
+			fieldErrors[cipName] = verificationTuple.Errors
+			policyResults[cipName] = &policyResult
+		}
+	}
+	return filteredPolicies, policyResults, fieldErrors
 }
 
 func errorsToFieldErrors(image, field string, index int, fieldErrors map[string][]error) (errs *apis.FieldError) {
