@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config
+package imagepolicies
 
 import (
 	"encoding/json"
@@ -40,6 +40,8 @@ type ImagePolicyConfig struct {
 	// This is the list of ImagePolicies that a admission controller uses
 	// to make policy decisions.
 	Policies map[string]webhookcip.ClusterImagePolicy
+
+	NamespacedPolicies map[string]webhookcip.ImagePolicy
 }
 
 // NewImagePoliciesConfigFromMap creates an ImagePolicyConfig from the supplied
@@ -57,11 +59,17 @@ func NewImagePoliciesConfigFromMap(data map[string]string) (*ImagePolicyConfig, 
 			return nil, fmt.Errorf("configmap has an entry %q but no value", k)
 		}
 		clusterImagePolicy := &webhookcip.ClusterImagePolicy{}
-
-		if err := parseEntry(v, clusterImagePolicy); err != nil {
+		imagePolicy := &webhookcip.ImagePolicy{}
+		cip, ip, err := parseEntry(v, clusterImagePolicy, imagePolicy)
+		if err != nil {
 			return nil, fmt.Errorf("failed to parse the entry %q : %q : %w", k, v, err)
 		}
-		ret.Policies[k] = *clusterImagePolicy
+		if cip != nil {
+			ret.Policies[k] = *clusterImagePolicy
+		}
+		if ip != nil {
+			ret.NamespacedPolicies[k] = *imagePolicy
+		}
 	}
 	return ret, nil
 }
@@ -83,7 +91,7 @@ func parseEntry(entry string, out interface{}) error {
 // need to be matched for the given kind, version and labels (if provided) to then match the Image.
 // Returned map contains the name of the CIP as the key, and a normalized
 // ClusterImagePolicy for it.
-func (p *ImagePolicyConfig) GetMatchingPolicies(image string, kind, apiVersion string, labels map[string]string) (map[string]webhookcip.ClusterImagePolicy, error) {
+func (p *ImagePolicyConfig) GetMatchingPolicies(image string, kind, apiVersion string, labels map[string]string, namespace string) (map[string]webhookcip.ClusterImagePolicy, map[string]webhookcip.ImagePolicy, error) {
 	if p == nil {
 		return nil, errors.New("config is nil")
 	}

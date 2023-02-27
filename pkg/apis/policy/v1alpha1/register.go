@@ -49,6 +49,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ClusterImagePolicyList{},
 		&TrustRoot{},
 		&TrustRootList{},
+		&ImagePolicy{},
+		&ImagePolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
